@@ -23,7 +23,7 @@ fadec_setup;
 %  Simulation settings
 %  ========================================================================
 Ts = pid.Ts;                  % Sample time (0.02s = 50 Hz)
-T_total = 60;                 % Total simulation time (seconds)
+T_total = 75;                 % Total simulation time (seconds)
 N_steps = round(T_total / Ts);
 
 %% ========================================================================
@@ -36,19 +36,19 @@ N_steps = round(T_total / Ts);
 
 throttle_profile = [
 %   t_start  t_end  tla_deg
-    0        2      -30      % Engine at idle
-    2        4       30      % Advance to climb
-    4       12       30      % Hold climb
-   12       14       90      % Advance toward TOGA
-   14       22       90      % Hold near TOGA
-   22       24       60      % Pull back to cruise
-   24       35       60      % Hold cruise
-   35       37      120      % Slam to full TOGA (test accel limiter)
-   37       45      120      % Hold full TOGA (test EGT limiting)
-   45       47      -30      % Snap to idle (test decel limiter)
-   47       55      -30      % Hold idle
-   55       57       90      % Quick advance (test accel limiter again)
-   57       60       90      % Hold
+    0       17      -30      % OFF then start sequence then idle
+   17       19       30      % Advance to climb
+   19       27       30      % Hold climb
+   27       29       90      % Advance toward TOGA
+   29       37       90      % Hold near TOGA
+   37       39       60      % Pull back to cruise
+   39       50       60      % Hold cruise
+   50       52      120      % Slam to full TOGA
+   52       60      120      % Hold full TOGA
+   60       62      -30      % Snap to idle
+   62       70      -30      % Hold idle
+   70       72       90      % Quick advance
+   72       75       90      % Hold
 ];
 
 % Build TLA time series from profile
@@ -69,6 +69,14 @@ load_timeseries = zeros(N_steps, 1);
 % load_timeseries(round(30/Ts):round(33/Ts)) = 0.01;  % 0.01 N·m pulse
 
 %% ========================================================================
+%  Engine start button profile
+%  ========================================================================
+start_timeseries = zeros(N_steps, 1);
+% Press start button at t=2s, release at t=3s
+start_idx_on  = round(2 / Ts);
+start_idx_off = round(3 / Ts);
+start_timeseries(start_idx_on:start_idx_off) = 1;
+%% ========================================================================
 %  Pre-allocate data logging arrays
 %  ========================================================================
 log.time       = zeros(N_steps, 1);
@@ -86,6 +94,9 @@ log.motor_i    = zeros(N_steps, 1);
 log.accel_flag = zeros(N_steps, 1);
 log.egt_flag   = zeros(N_steps, 1);
 log.ovspd_flag = zeros(N_steps, 1);
+log.start_state = zeros(N_steps, 1);
+log.starter_torque = zeros(N_steps, 1);
+log.fuel_valve    = zeros(N_steps, 1);
 
 %% ========================================================================
 %  PID controller state
@@ -116,38 +127,60 @@ for k = 1:N_steps
         n1_actual = 0;
     end
 
-    % --- 4. PID controller ---
-    error = n1_demand - n1_actual;
+  % --- 4. Engine start state machine ---
+    start_btn = start_timeseries(k);
+    [start_n1_cmd, start_state, starter_torque, fuel_valve] = ...
+        engine_start_sequence(start_btn, n1_actual, egt_val, Ts);
 
-    pid_integral = pid_integral + error * Ts;
-    % Anti-windup: clamp integral
-    max_integral = pid.output_max / max(pid.Ki, 0.01);
-    pid_integral = max(-max_integral, min(max_integral, pid_integral));
-
-    if k > 1
-        pid_derivative = (error - pid_prev_error) / Ts;
+    % --- 5. Decide control mode ---
+    if start_state < 4
+        % START SEQUENCE ACTIVE — bypass PID, use starter torque directly
+        pwm_cmd = starter_torque;
+        pid_out = 0;
+        n1_limited = starter_torque;
+        accel_flag = 0;
+        egt_flag = 0;
+        ovspd_flag = 0;
     else
-        pid_derivative = 0;
+        % NORMAL FADEC OPERATION — PID controls
+        % PID controller
+        error = n1_demand - n1_actual;
+
+        pid_integral = pid_integral + error * Ts;
+        max_integral = pid.output_max / max(pid.Ki, 0.01);
+        pid_integral = max(-max_integral, min(max_integral, pid_integral));
+
+        if k > 1
+            pid_derivative = (error - pid_prev_error) / Ts;
+        else
+            pid_derivative = 0;
+        end
+
+        pid_out = pid.Kp * error + pid.Ki * pid_integral + pid.Kd * pid_derivative;
+        pid_out = max(pid.output_min, min(pid.output_max, pid_out));
+        pid_prev_error = error;
+
+        % Thermodynamic model
+        [egt_val, ps3_val, wf_val, fn_val] = fadec_thermo_model(n1_actual);
+
+        % Limit logic
+        [n1_limited, accel_flag, egt_flag, ovspd_flag] = ...
+            fadec_limit_logic(pid_out, n1_actual, egt_val, Ts);
+
+        pwm_cmd = n1_limited;
     end
 
-    pid_out = pid.Kp * error + pid.Ki * pid_integral + pid.Kd * pid_derivative;
-    pid_out = max(pid.output_min, min(pid.output_max, pid_out));
-    pid_prev_error = error;
-
-    % --- 5. Thermodynamic model (uses previous N1) ---
-    [egt_val, ps3_val, wf_val, fn_val] = fadec_thermo_model(n1_actual);
-
-    % --- 6. Limit logic ---
-    [n1_limited, accel_flag, egt_flag, ovspd_flag] = ...
-        fadec_limit_logic(pid_out, n1_actual, egt_val, Ts);
-
-    % --- 7. Motor plant model ---
-    pwm_cmd = n1_limited;  % In sim, limited N1 maps directly to PWM
+    % --- 6. Motor plant model (always runs) ---
     ext_load = load_timeseries(k);
-
     [n1_actual, n1_pos, motor_i] = ev3_motor_plant(pwm_cmd, ext_load, Ts);
 
+    % --- 7. Thermo model (always runs for gauge display) ---
+    [egt_val, ps3_val, wf_val, fn_val] = fadec_thermo_model(n1_actual);
+
     % --- 8. Log everything ---
+    log.start_state(k)    = start_state;
+    log.starter_torque(k) = starter_torque;
+    log.fuel_valve(k)     = fuel_valve;
     log.time(k)       = t;
     log.tla_deg(k)    = tla_deg;
     log.n1_demand(k)  = n1_demand;
@@ -237,12 +270,20 @@ yticks([0 1 2 3]);
 yticklabels({'Off', 'Overspeed', 'EGT', 'Accel'});
 grid on; xlim([0 T_total]);
 
-% --- Compressor discharge pressure ---
+% --- Engine start sequence ---
 subplot(4, 2, 8);
-plot(log.time, log.ps3, 'Color', [0.3 0.6 0.6], 'LineWidth', 1.5);
-ylabel('Ps3 (psia)');
-title('Compressor Discharge Pressure');
+yyaxis left;
+area(log.time, log.start_state, 'FaceColor', [0.6 0.85 0.6], ...
+    'EdgeColor', 'none', 'FaceAlpha', 0.5);
+ylabel('State');
+yticks([0 1 2 3 4]);
+yticklabels({'OFF', 'CRANK', 'LIGHT', 'STAB', 'IDLE'});
+yyaxis right;
+plot(log.time, log.fuel_valve * 100, 'r-', 'LineWidth', 1.5);
+ylabel('Fuel valve (%)');
+title('Engine Start Sequence');
 grid on; xlim([0 T_total]);
+legend('Start state', 'Fuel valve', 'Location', 'east');
 
 xlabel('Time (s)');
 sgtitle('FADEC Simulation — CFM LEAP Hobby Model', 'FontWeight', 'bold');
@@ -268,6 +309,8 @@ fprintf('  Overspeed protect: active %.1f %% of time\n', ...
 fprintf('============================================\n');
 fprintf('\nPID Gains: Kp=%.2f  Ki=%.2f  Kd=%.2f\n', pid.Kp, pid.Ki, pid.Kd);
 fprintf('Adjust gains in fadec_setup.m and re-run.\n');
+fprintf('  Start sequence:    completed at t=%.1f s\n', ...
+    log.time(find(log.start_state == 4, 1, 'first')));
 
 %% ========================================================================
 %  Helper function: interpolate throttle profile
