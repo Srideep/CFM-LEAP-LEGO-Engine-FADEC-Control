@@ -3,7 +3,7 @@
 %
 %  This script runs the entire FADEC control loop in pure MATLAB:
 %    Throttle input → TLA lookup → PID → Limit logic → Motor plant model
-%         ↑                                                    |
+%         ↑                                                   |
 %         └──── Thermo model ← N1 feedback ←──────────────────┘
 %
 %  Use this to develop, tune, and validate your FADEC while waiting
