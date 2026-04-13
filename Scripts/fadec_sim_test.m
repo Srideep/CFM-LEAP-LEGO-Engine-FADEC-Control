@@ -33,23 +33,8 @@ N_steps = round(T_total / Ts);
 %
 %  Format: [time_start, time_end, tla_degrees]
 %  The throttle lever angle is interpolated between segments.
-
-throttle_profile = [
-%   t_start  t_end  tla_deg
-    0       17      -30      % OFF then start sequence then idle
-   17       19       30      % Advance to climb
-   19       27       30      % Hold climb
-   27       29       90      % Advance toward TOGA
-   29       37       90      % Hold near TOGA
-   37       39       60      % Pull back to cruise
-   39       50       60      % Hold cruise
-   50       52      120      % Slam to full TOGA
-   52       60      120      % Hold full TOGA
-   60       62      -30      % Snap to idle
-   62       70      -30      % Hold idle
-   70       72       90      % Quick advance
-   72       75       90      % Hold
-];
+mode = 'departure';
+[throttle_profile, T_total] = throttle_profiles(mode);
 
 % Build TLA time series from profile
 tla_timeseries = zeros(N_steps, 1);
@@ -291,7 +276,8 @@ grid on; xlim([0 T_total]);
 legend('Start state', 'Fuel valve', 'Location', 'east');
 
 xlabel('Time (s)');
-sgtitle('FADEC Simulation — CFM LEAP Hobby Model', 'FontWeight', 'bold');
+sgtitle("CFM LEAP Model FADEC Simulation — Throttle Scenario: " + upper(string(mode)), ...
+    'FontWeight', 'bold');
 
 %% ========================================================================
 %  Print summary statistics
