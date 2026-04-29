@@ -1,3 +1,4 @@
+load("/MATLAB Drive/CFM-LEAP-LEGO-Engine-FADEC-Control/out.mat");
 %% Extract all signals
 tla    = logsout.getElement('TLA_deg').Values;
 n1_dem = logsout.getElement('N1_demand').Values;
@@ -85,3 +86,4 @@ fprintf('Accel lim:  active %.1f%% of time\n', 100*mean(af.Data));
 fprintf('EGT lim:    active %.1f%% of time\n', 100*mean(ef.Data));
 fprintf('Ovspd lim:  active %.1f%% of time\n', 100*mean(of.Data));
 fprintf('===============================\n');
+clear;
